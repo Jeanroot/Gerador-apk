@@ -38,7 +38,6 @@ jobs:
           INPUT_URL: ${{ github.event.inputs.target_url }}
         run: |
           set -e
-          # Localiza ferramentas nativas do Android SDK na imagem do GitHub
           BUILD_TOOLS=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -n 1)
           PLATFORM=$(ls -d $ANDROID_HOME/platforms/android-* | sort -V | tail -n 1)
           ANDROID_JAR="$PLATFORM/android.jar"
@@ -49,24 +48,21 @@ jobs:
           mkdir -p res/values
           mkdir -p build/classes
 
-          # Cria XML de Strings seguro para nomes com espaços
-          cat <<EOF > res/values/strings.xml
+          cat <<EOF> res/values/strings.xml
           <?xml version="1.0" encoding="utf-8"?>
           <resources>
               <string name="app_name">$INPUT_APP_NAME</string>
           </resources>
           EOF
 
-          # Cria config.json interno
-          cat <<EOF > assets/config.json
+          cat <<EOF> assets/config.json
           {
             "mode": "$INPUT_MODE",
             "url": "$INPUT_URL"
           }
           EOF
 
-          # Cria AndroidManifest.xml
-          cat <<EOF > AndroidManifest.xml
+          cat <<EOF> AndroidManifest.xml
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android"
               package="$INPUT_PKG_NAME"
@@ -98,7 +94,6 @@ jobs:
           </manifest>
           EOF
 
-          # Cria código Java da aplicação
           cat << 'EOF' > src/$PKG_PATH/MainActivity.java
           package __PACKAGE_NAME__;
           import android.app.Activity;
@@ -136,32 +131,40 @@ jobs:
                   carregarConfiguracao();
               }
               private void carregarConfiguracao() {
-                  new Thread(() -> {
-                      try {
-                          InputStream is = getAssets().open("config.json");
-                          BufferedReader r = new BufferedReader(new InputStreamReader(is));
-                          StringBuilder sb = new StringBuilder();
-                          String l;
-                          while ((l = r.readLine()) != null) sb.append(l);
-                          JSONObject cfg = new JSONObject(sb.toString());
-                          String mode = cfg.getString("mode");
-                          String targetUrl = cfg.getString("url");
-                          if ("dns_panel".equals(mode)) {
-                              try {
-                                  HttpURLConnection c = (HttpURLConnection) new URL(targetUrl).openConnection();
-                                  c.setConnectTimeout(5000);
-                                  BufferedReader ar = new BufferedReader(new InputStreamReader(c.getInputStream()));
-                                  String resp = ar.readLine();
-                                  if (resp != null && resp.trim().startsWith("{")) {
-                                      targetUrl = new JSONObject(resp).optString("dns", targetUrl);
-                                  } else if (resp != null && resp.trim().startsWith("http")) {
-                                      targetUrl = resp.trim();
+                  new Thread(new Runnable() {
+                      @Override
+                      public void run() {
+                          try {
+                              InputStream is = getAssets().open("config.json");
+                              BufferedReader r = new BufferedReader(new InputStreamReader(is));
+                              StringBuilder sb = new StringBuilder();
+                              String l;
+                              while ((l = r.readLine()) != null) sb.append(l);
+                              JSONObject cfg = new JSONObject(sb.toString());
+                              String mode = cfg.getString("mode");
+                              String targetUrl = cfg.getString("url");
+                              if ("dns_panel".equals(mode)) {
+                                  try {
+                                      HttpURLConnection c = (HttpURLConnection) new URL(targetUrl).openConnection();
+                                      c.setConnectTimeout(5000);
+                                      BufferedReader ar = new BufferedReader(new InputStreamReader(c.getInputStream()));
+                                      String resp = ar.readLine();
+                                      if (resp != null && resp.trim().startsWith("{")) {
+                                          targetUrl = new JSONObject(resp).optString("dns", targetUrl);
+                                      } else if (resp != null && resp.trim().startsWith("http")) {
+                                          targetUrl = resp.trim();
+                                      }
+                                  } catch (Exception ignored) {}
+                              }
+                              final String finalUrl = targetUrl;
+                              runOnUiThread(new Runnable() {
+                                  @Override
+                                  public void run() {
+                                      webView.loadUrl(finalUrl);
                                   }
-                              } catch (Exception ignored) {}
-                          }
-                          final String finalUrl = targetUrl;
-                          runOnUiThread(() -> webView.loadUrl(finalUrl));
-                      } catch (Exception e) { e.printStackTrace(); }
+                              });
+                          } catch (Exception e) { e.printStackTrace(); }
+                      }
                   }).start();
               }
               @Override
@@ -176,16 +179,13 @@ jobs:
           EOF
           sed -i "s/__PACKAGE_NAME__/$INPUT_PKG_NAME/g" src/$PKG_PATH/MainActivity.java
 
-          # 1. Compila recursos com AAPT2
           $BUILD_TOOLS/aapt2 compile --dir res -o res.zip
           $BUILD_TOOLS/aapt2 link -I "$ANDROID_JAR" --manifest AndroidManifest.xml -A assets -o unaligned.apk res.zip --java src
 
-          # 2. Compila Java e gera classes.dex com D8
-          javac -source 1.8 -target 1.8 -bootclasspath "$ANDROID_JAR" -classpath "$ANDROID_JAR" -d build/classes src/$PKG_PATH/*.java
+          javac -source 17 -target 17 -bootclasspath "$ANDROID_JAR" -classpath "$ANDROID_JAR" -d build/classes src/$PKG_PATH/*.java
           $BUILD_TOOLS/d8 build/classes/$PKG_PATH/*.class --lib "$ANDROID_JAR" --output .
           zip -uj unaligned.apk classes.dex
 
-          # 3. Alinha e assina o APK com chave Android
           $BUILD_TOOLS/zipalign -p -f 4 unaligned.apk aligned.apk
           keytool -genkeypair -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android,O=Android,C=PT"
           $BUILD_TOOLS/apksigner sign --ks debug.keystore --ks-pass pass:android --key-pass pass:android --out Aplicativo-Pronto.apk aligned.apk
