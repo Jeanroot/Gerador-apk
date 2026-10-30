@@ -19,11 +19,22 @@ on:
         description: 'URL'
         required: true
         default: 'https://webplayer.tvsbr.top'
+      orientation:
+        description: 'Orientacao da Tela'
+        required: false
+        default: 'unspecified'
+      icon_url:
+        description: 'URL do Icone opcional'
+        required: false
+        default: ''
 
 jobs:
   build-apk:
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout do Repositorio
+        uses: actions/checkout@v4
+
       - name: Configurar Java JDK 17
         uses: actions/setup-java@v4
         with:
@@ -36,6 +47,8 @@ jobs:
           INPUT_PKG_NAME: ${{ github.event.inputs.package_name }}
           INPUT_MODE: ${{ github.event.inputs.mode }}
           INPUT_URL: ${{ github.event.inputs.target_url }}
+          INPUT_ORIENTATION: ${{ github.event.inputs.orientation }}
+          INPUT_ICON_URL: ${{ github.event.inputs.icon_url }}
         run: |
           set -e
           BUILD_TOOLS=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -n 1)
@@ -46,13 +59,27 @@ jobs:
           mkdir -p "src/$PKG_PATH"
           mkdir -p assets
           mkdir -p res/values
+          mkdir -p res/drawable
           mkdir -p build/classes
+
+          if [ -f "custom_icon.png" ]; then
+            cp custom_icon.png res/drawable/ic_launcher.png
+          elif [ -n "$INPUT_ICON_URL" ]; then
+            curl -L -s "$INPUT_ICON_URL" -o res/drawable/ic_launcher.png || true
+          fi
+
+          ICON_ATTR=""
+          if [ -s "res/drawable/ic_launcher.png" ]; then
+            ICON_ATTR='android:icon="@drawable/ic_launcher"'
+          fi
+
+          ORIENT_VAL="${INPUT_ORIENTATION:-unspecified}"
 
           printf '<?xml version="1.0" encoding="utf-8"?>\n<resources>\n    <string name="app_name">%s</string>\n</resources>\n' "$INPUT_APP_NAME" > res/values/strings.xml
 
           printf '{\n  "mode": "%s",\n  "url": "%s"\n}\n' "$INPUT_MODE" "$INPUT_URL" > assets/config.json
 
-          printf '<?xml version="1.0" encoding="utf-8"?>\n<manifest xmlns:android="http://schemas.android.com/apk/res/android"\n    package="%s"\n    android:versionCode="1"\n    android:versionName="1.0">\n    <uses-sdk android:minSdkVersion="21" android:targetSdkVersion="33" />\n    <uses-permission android:name="android.permission.INTERNET" />\n    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />\n    <uses-feature android:name="android.software.leanback" android:required="false" />\n    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />\n    <application\n        android:allowBackup="true"\n        android:label="@string/app_name"\n        android:usesCleartextTraffic="true"\n        android:hardwareAccelerated="true"\n        android:theme="@android:style/Theme.NoTitleBar.Fullscreen">\n        <activity\n            android:name=".MainActivity"\n            android:configChanges="orientation|screenSize|keyboardHidden|keyboard|navigation"\n            android:screenOrientation="sensorLandscape"\n            android:exported="true">\n            <intent-filter>\n                <action android:name="android.intent.action.MAIN" />\n                <category android:name="android.intent.category.LAUNCHER" />\n                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />\n            </intent-filter>\n        </activity>\n    </application>\n</manifest>\n' "$INPUT_PKG_NAME" > AndroidManifest.xml
+          printf '<?xml version="1.0" encoding="utf-8"?>\n<manifest xmlns:android="http://schemas.android.com/apk/res/android"\n    package="%s"\n    android:versionCode="1"\n    android:versionName="1.0">\n    <uses-sdk android:minSdkVersion="21" android:targetSdkVersion="33" />\n    <uses-permission android:name="android.permission.INTERNET" />\n    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />\n    <uses-feature android:name="android.software.leanback" android:required="false" />\n    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />\n    <application\n        android:allowBackup="true"\n        android:label="@string/app_name"\n        %s\n        android:usesCleartextTraffic="true"\n        android:hardwareAccelerated="true"\n        android:theme="@android:style/Theme.NoTitleBar.Fullscreen">\n        <activity\n            android:name=".MainActivity"\n            android:configChanges="orientation|screenSize|keyboardHidden|keyboard|navigation"\n            android:screenOrientation="%s"\n            android:exported="true">\n            <intent-filter>\n                <action android:name="android.intent.action.MAIN" />\n                <category android:name="android.intent.category.LAUNCHER" />\n                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />\n            </intent-filter>\n        </activity>\n    </application>\n</manifest>\n' "$INPUT_PKG_NAME" "$ICON_ATTR" "$ORIENT_VAL" > AndroidManifest.xml
 
           cat << 'EOF' > "src/$PKG_PATH/MainActivity.java"
           package __PACKAGE_NAME__;
