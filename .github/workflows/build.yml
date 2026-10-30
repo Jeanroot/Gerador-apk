@@ -6,7 +6,7 @@ on:
       app_name:
         description: 'Nome do Aplicativo'
         required: true
-        default: 'Meu Player TV'
+        default: 'ZEN PLAY'
       package_name:
         description: 'Pacote'
         required: true
@@ -18,7 +18,7 @@ on:
       target_url:
         description: 'URL'
         required: true
-        default: 'https://exemplo.com'
+        default: 'https://webplayer.tvsbr.top'
 
 jobs:
   build-apk:
@@ -30,74 +30,56 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Configurar Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Gerar Estrutura do Projeto Android
+      - name: Compilar e Assinar APK Direto via Android SDK
+        env:
+          INPUT_APP_NAME: ${{ github.event.inputs.app_name }}
+          INPUT_PKG_NAME: ${{ github.event.inputs.package_name }}
+          INPUT_MODE: ${{ github.event.inputs.mode }}
+          INPUT_URL: ${{ github.event.inputs.target_url }}
         run: |
-          PKG_PATH=$(echo "${{ github.event.inputs.package_name }}" | tr '.' '/')
-          mkdir -p app/src/main/java/$PKG_PATH
-          mkdir -p app/src/main/assets
+          set -e
+          # Localiza ferramentas nativas do Android SDK na imagem do GitHub
+          BUILD_TOOLS=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -n 1)
+          PLATFORM=$(ls -d $ANDROID_HOME/platforms/android-* | sort -V | tail -n 1)
+          ANDROID_JAR="$PLATFORM/android.jar"
 
-          cat <<EOF > app/src/main/assets/config.json
+          PKG_PATH=$(echo "$INPUT_PKG_NAME" | tr '.' '/')
+          mkdir -p src/$PKG_PATH
+          mkdir -p assets
+          mkdir -p res/values
+          mkdir -p build/classes
+
+          # Cria XML de Strings seguro para nomes com espaços
+          cat <<EOF > res/values/strings.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="app_name">$INPUT_APP_NAME</string>
+          </resources>
+          EOF
+
+          # Cria config.json interno
+          cat <<EOF > assets/config.json
           {
-            "mode": "${{ github.event.inputs.mode }}",
-            "url": "${{ github.event.inputs.target_url }}"
+            "mode": "$INPUT_MODE",
+            "url": "$INPUT_URL"
           }
           EOF
 
-          echo 'rootProject.name = "TVPlayerApp"' > settings.gradle
-          echo 'include ":app"' >> settings.gradle
-
-          cat <<EOF > build.gradle
-          buildscript {
-              repositories {
-                  google()
-                  mavenCentral()
-              }
-              dependencies {
-                  classpath 'com.android.tools.build:gradle:8.1.0'
-              }
-          }
-          allprojects {
-              repositories {
-                  google()
-                  mavenCentral()
-              }
-          }
-          EOF
-
-          cat <<EOF > app/build.gradle
-          apply plugin: 'com.android.application'
-          android {
-              namespace "${{ github.event.inputs.package_name }}"
-              compileSdk 34
-              defaultConfig {
-                  applicationId "${{ github.event.inputs.package_name }}"
-                  minSdk 21
-                  targetSdk 34
-                  versionCode 1
-                  versionName "1.0"
-              }
-              buildTypes {
-                  debug {
-                      minifyEnabled false
-                  }
-              }
-          }
-          EOF
-
-          cat <<EOF > app/src/main/AndroidManifest.xml
+          # Cria AndroidManifest.xml
+          cat <<EOF > AndroidManifest.xml
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-              package="${{ github.event.inputs.package_name }}">
+              package="$INPUT_PKG_NAME"
+              android:versionCode="1"
+              android:versionName="1.0">
+              <uses-sdk android:minSdkVersion="21" android:targetSdkVersion="33" />
               <uses-permission android:name="android.permission.INTERNET" />
               <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
               <uses-feature android:name="android.software.leanback" android:required="false" />
               <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
               <application
                   android:allowBackup="true"
-                  android:label="${{ github.event.inputs.app_name }}"
+                  android:label="@string/app_name"
                   android:usesCleartextTraffic="true"
                   android:hardwareAccelerated="true"
                   android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
@@ -116,7 +98,8 @@ jobs:
           </manifest>
           EOF
 
-          cat << 'EOF' > app/src/main/java/$PKG_PATH/MainActivity.java
+          # Cria código Java da aplicação
+          cat << 'EOF' > src/$PKG_PATH/MainActivity.java
           package __PACKAGE_NAME__;
           import android.app.Activity;
           import android.os.Bundle;
@@ -191,15 +174,24 @@ jobs:
               }
           }
           EOF
-          sed -i "s/__PACKAGE_NAME__/${{ github.event.inputs.package_name }}/g" app/src/main/java/$PKG_PATH/MainActivity.java
+          sed -i "s/__PACKAGE_NAME__/$INPUT_PKG_NAME/g" src/$PKG_PATH/MainActivity.java
 
-      - name: Compilar APK com Gradle
-        run: |
-          gradle wrapper --gradle-version 8.2
-          ./gradlew assembleDebug
+          # 1. Compila recursos com AAPT2
+          $BUILD_TOOLS/aapt2 compile --dir res -o res.zip
+          $BUILD_TOOLS/aapt2 link -I "$ANDROID_JAR" --manifest AndroidManifest.xml -A assets -o unaligned.apk res.zip --java src
+
+          # 2. Compila Java e gera classes.dex com D8
+          javac -source 1.8 -target 1.8 -bootclasspath "$ANDROID_JAR" -classpath "$ANDROID_JAR" -d build/classes src/$PKG_PATH/*.java
+          $BUILD_TOOLS/d8 build/classes/$PKG_PATH/*.class --lib "$ANDROID_JAR" --output .
+          zip -uj unaligned.apk classes.dex
+
+          # 3. Alinha e assina o APK com chave Android
+          $BUILD_TOOLS/zipalign -p -f 4 unaligned.apk aligned.apk
+          keytool -genkeypair -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android,O=Android,C=PT"
+          $BUILD_TOOLS/apksigner sign --ks debug.keystore --ks-pass pass:android --key-pass pass:android --out Aplicativo-Pronto.apk aligned.apk
 
       - name: Publicar APK
         uses: actions/upload-artifact@v4
         with:
           name: APK-Pronto
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: Aplicativo-Pronto.apk
